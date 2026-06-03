@@ -4,14 +4,17 @@ const FALLBACK_URL  = 'https://open.er-api.com/v6/latest/USD';
 const TIMEOUT_MS    = 7000;
 const RT_TIMEOUT_MS = 6000;   // realtime source: fail fast so we fall back quickly (e.g. in China)
 
-// Realtime source: Yahoo Finance chart API (near real-time, minute-level).
-// Yahoo does not send CORS headers, so the request is routed through a public
-// CORS proxy. Both proxies are raced; if all fail (e.g. blocked in China) we
-// transparently fall back to the ECB/er-api daily sources below.
+// Realtime sources (routed through a raced pool of public CORS proxies, since
+// neither Naver nor Yahoo sends CORS headers). If all proxies fail (e.g. blocked
+// in China) we transparently fall back to the ECB/er-api daily sources below.
+//   - Naver Finance: 하나은행 매매기준율 — exactly what Naver shows Korean users.
+//   - Yahoo Finance:  global mid-market rate, minute-level.
+const NAVER_BASE    = 'https://m.stock.naver.com/front-api/marketIndex/prices?category=exchange&page=1&reutersCode=';
 const YAHOO_BASE    = 'https://query1.finance.yahoo.com/v8/finance/chart/';
 const CORS_PROXIES  = [
   'https://corsproxy.io/?url=',
   'https://api.allorigins.win/raw?url=',
+  'https://api.codetabs.com/v1/proxy/?quest=',
 ];
 const REFRESH_MS    = 5 * 60 * 1000;   // 5 minutes
 const CACHE_52W_TTL = 24 * 60 * 60 * 1000;  // 24 hours
@@ -29,7 +32,7 @@ const state = {
   countdownTimer:  null,
   clockTimer:      null,
   isLoading:       false,
-  apiSource:       null,  // 'realtime' | 'primary' | 'fallback' | 'cache'
+  apiSource:       null,  // 'naver' | 'realtime' | 'primary' | 'fallback' | 'cache'
   h52wSource:      null,  // 'fresh' | 'cache' | 'expired-cache' | 'none'
 };
 
@@ -95,19 +98,50 @@ async function fetchWithTimeout(url, ms = TIMEOUT_MS) {
   }
 }
 
+// Race a target URL across all CORS proxies: resolve with the first proxy
+// whose response passes `extract`, reject (AggregateError) only if all fail.
+function fetchViaProxies(target, extract) {
+  const attempts = CORS_PROXIES.map(async (proxy) => {
+    const json  = await fetchWithTimeout(proxy + encodeURIComponent(target), RT_TIMEOUT_MS);
+    const value = extract(json);
+    if (typeof value !== 'number' || !(value > 0)) throw new Error('No usable value in response');
+    return value;
+  });
+  return Promise.any(attempts);
+}
+
+// ── Fetch: realtime rates (Naver — 하나은행 매매기준율) ──
+// reutersCode "FX_USDKRW" → USD/KRW, "FX_CNYKRW" → CNY/KRW (직접 호가).
+async function fetchNaverPrice(reutersCode) {
+  return fetchViaProxies(NAVER_BASE + reutersCode, (json) => {
+    // front-api returns { result: [{ closePrice }] }; older api returns { closePrice }.
+    const node = (json && json.result && json.result[0]) || json;
+    const raw  = node && node.closePrice;
+    return parseFloat(String(raw).replace(/[^0-9.]/g, ''));  // strip thousands separators
+  });
+}
+
+async function fetchNaver() {
+  const [usdKrw, cnyKrw] = await Promise.all([
+    fetchNaverPrice('FX_USDKRW'),
+    fetchNaverPrice('FX_CNYKRW'),
+  ]);
+  // Sanity guards: if Naver changes its format and we mis-parse, fall back to
+  // another source instead of rendering a garbage number.
+  if (!(usdKrw > 500 && usdKrw < 3000)) throw new Error('USD/KRW out of sane range');
+  if (!(cnyKrw > 80  && cnyKrw < 500))  throw new Error('CNY/KRW out of sane range');
+  // Keep the { KRW, CNY } shape: processLatest derives cny-krw = KRW / CNY,
+  // which round-trips back to Naver's CNY/KRW exactly.
+  return { KRW: usdKrw, CNY: usdKrw / cnyKrw };
+}
+
 // ── Fetch: realtime rates (Yahoo Finance via CORS proxy) ──
 // Symbol "KRW=X" → USD/KRW, "CNY=X" → USD/CNY.
 async function fetchYahooSymbol(symbol) {
   const target = `${YAHOO_BASE}${encodeURIComponent(symbol)}?interval=1d&range=1d`;
-  // Race the proxies: resolve on the first that succeeds, reject only if all fail.
-  const attempts = CORS_PROXIES.map(async (proxy) => {
-    const json  = await fetchWithTimeout(proxy + encodeURIComponent(target), RT_TIMEOUT_MS);
-    const price = json && json.chart && json.chart.result && json.chart.result[0]
-      && json.chart.result[0].meta && json.chart.result[0].meta.regularMarketPrice;
-    if (typeof price !== 'number' || !(price > 0)) throw new Error('No price in Yahoo response');
-    return price;
-  });
-  return Promise.any(attempts);
+  return fetchViaProxies(target, (json) =>
+    json && json.chart && json.chart.result && json.chart.result[0]
+      && json.chart.result[0].meta && json.chart.result[0].meta.regularMarketPrice);
 }
 
 async function fetchRealtime() {
@@ -120,7 +154,17 @@ async function fetchRealtime() {
 
 // ── Fetch: current rates ──────────────────────────────────
 async function fetchLatest() {
-  // 0. Realtime source (Yahoo Finance, minute-level) — best effort, racey
+  // 0a. Naver (하나은행 매매기준율) — matches what Korean users see on Naver
+  try {
+    const rates = await fetchNaver();
+    saveCache('er_latest', rates);
+    state.apiSource = 'naver';
+    return rates;
+  } catch (e) {
+    console.warn('Realtime (Naver) failed:', e.message);
+  }
+
+  // 0b. Yahoo Finance (global mid-market, minute-level) — best effort, racey
   try {
     const rates = await fetchRealtime();
     saveCache('er_latest', rates);
@@ -292,7 +336,7 @@ function updateFooter() {
   const badge = document.getElementById('source-badge');
   let label = '', cls = '';
 
-  // 'realtime' (Yahoo) is the freshest source → no badge.
+  // 'naver' (하나은행 매매기준율) and 'realtime' (Yahoo) are live → no badge.
   if (state.apiSource === 'primary') {
     label = 'ECB 일일고시'; cls = 'src-primary';
   } else if (state.apiSource === 'fallback') {
