@@ -451,14 +451,22 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ── Manual refresh ────────────────────────────────────────
-document.getElementById('refresh-btn').addEventListener('click', () => {
+function manualRefresh() {
   if (state.isLoading) return;
   clearInterval(state.refreshTimer);
   clearInterval(state.countdownTimer);
   document.getElementById('refresh-countdown').textContent = '갱신 중...';
+  const topBtn = document.getElementById('refresh-btn-top');
+  if (topBtn) topBtn.classList.add('spinning');
   showSkeletons();
-  fetchAllData().then(() => scheduleRefresh());
-});
+  fetchAllData().then(() => {
+    scheduleRefresh();
+    if (topBtn) topBtn.classList.remove('spinning');
+  });
+}
+
+document.getElementById('refresh-btn').addEventListener('click', manualRefresh);
+document.getElementById('refresh-btn-top').addEventListener('click', manualRefresh);
 
 // ── Init ──────────────────────────────────────────────────
 function init() {
