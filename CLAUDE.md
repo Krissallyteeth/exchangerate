@@ -29,13 +29,16 @@ init()
 
 ### API resilience (China VPN-off support)
 
-`fetchLatest()` tries four sources in order:
-1. **Realtime**: Yahoo Finance chart API (`KRW=X`, `CNY=X`) — minute-level rates, the only source close to what Google shows. Yahoo sends no CORS headers, so requests are routed through a public CORS proxy (`corsproxy.io` / `allorigins.win`, raced via `Promise.any`). Best-effort: blocked in China → falls through. Sets `apiSource = 'realtime'` (no footer badge — freshest).
-2. `https://api.frankfurter.dev/v1/latest` (ECB **daily** reference rates, ~16:00 CET, weekdays only). Footer badge "ECB 일일고시".
-3. `https://open.er-api.com/v6/latest/USD` (fallback, daily, more accessible in China).
-4. `localStorage` key `er_latest` (1h TTL, used as last resort).
+`fetchLatest()` tries five sources in order:
+1. **Naver** (`m.stock.naver.com` front-api, `FX_USDKRW` + `FX_CNYKRW`) — 하나은행 매매기준율, exactly what Korean users see on Naver. `fetchNaver()` returns `{ KRW, CNY }` where `CNY = USDKRW/CNYKRW`, so `processLatest`'s `cny-krw = KRW/CNY` round-trips back to Naver's direct CNY/KRW. Sets `apiSource = 'naver'` (no footer badge — live).
+2. **Yahoo Finance** chart API (`KRW=X`, `CNY=X`) — global mid-market, minute-level (closer to Google). Sets `apiSource = 'realtime'` (no badge).
+3. `https://api.frankfurter.dev/v1/latest` (ECB **daily** reference rates, ~16:00 CET, weekdays only). Footer badge "ECB 일일고시".
+4. `https://open.er-api.com/v6/latest/USD` (fallback, daily, more accessible in China).
+5. `localStorage` key `er_latest` (1h TTL, used as last resort).
 
-> Note: sources 2–4 are daily, not real-time. Footer badge signals when a non-realtime source is in use so the user understands any gap vs Google's live rate.
+Sources 1–2 send no CORS headers, so requests are routed through a raced pool of public CORS proxies (`corsproxy.io` / `allorigins.win` / `codetabs.com`) via `fetchViaProxies()` (`Promise.any`). Best-effort: blocked in China → falls through. Naver values pass sanity-range guards so a format change falls back instead of rendering garbage.
+
+> Note: sources 3–5 are daily, not real-time. Footer badge signals when a non-live source is in use so the user understands any gap vs Naver/Google's live rate.
 
 `fetchHistorical()` for 52-week data:
 1. `frankfurter.dev` time-series endpoint (only source with free historical data)
