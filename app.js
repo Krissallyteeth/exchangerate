@@ -364,7 +364,16 @@ function updateFooter() {
   updateDataCredit();
 }
 
-// Footer credit reflects the source actually in use (not a hardcoded label).
+// Header subtitle + footer credit both reflect the source actually in use,
+// instead of a hardcoded "ECB 기준" label.
+const SUBTITLE_BY_SOURCE = {
+  naver:    '실시간 주요 환율 · 네이버(하나은행) 기준',
+  realtime: '실시간 주요 환율 · Yahoo Finance 기준',
+  primary:  '주요 환율 · ECB 일일고시 기준',
+  fallback: '주요 환율 · ExchangeRate-API 기준',
+  cache:    '주요 환율 · 캐시',
+};
+
 const CREDIT_BY_SOURCE = {
   naver:    '데이터: 하나은행 매매기준율 · 네이버 금융 (실시간)',
   realtime: '데이터: Yahoo Finance (실시간)',
@@ -374,8 +383,10 @@ const CREDIT_BY_SOURCE = {
 };
 
 function updateDataCredit() {
-  const el = document.getElementById('data-credit');
-  if (el) el.textContent = CREDIT_BY_SOURCE[state.apiSource] || CREDIT_BY_SOURCE.primary;
+  const subtitle = document.getElementById('subtitle');
+  if (subtitle) subtitle.textContent = SUBTITLE_BY_SOURCE[state.apiSource] || SUBTITLE_BY_SOURCE.primary;
+  const credit = document.getElementById('data-credit');
+  if (credit) credit.textContent = CREDIT_BY_SOURCE[state.apiSource] || CREDIT_BY_SOURCE.primary;
 }
 
 // ── Main fetch orchestration ──────────────────────────────
