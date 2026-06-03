@@ -2,6 +2,17 @@
 const PRIMARY_URL   = 'https://api.frankfurter.dev/v1';
 const FALLBACK_URL  = 'https://open.er-api.com/v6/latest/USD';
 const TIMEOUT_MS    = 7000;
+const RT_TIMEOUT_MS = 6000;   // realtime source: fail fast so we fall back quickly (e.g. in China)
+
+// Realtime source: Yahoo Finance chart API (near real-time, minute-level).
+// Yahoo does not send CORS headers, so the request is routed through a public
+// CORS proxy. Both proxies are raced; if all fail (e.g. blocked in China) we
+// transparently fall back to the ECB/er-api daily sources below.
+const YAHOO_BASE    = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+const CORS_PROXIES  = [
+  'https://corsproxy.io/?url=',
+  'https://api.allorigins.win/raw?url=',
+];
 const REFRESH_MS    = 5 * 60 * 1000;   // 5 minutes
 const CACHE_52W_TTL = 24 * 60 * 60 * 1000;  // 24 hours
 const CACHE_NOW_TTL = 60 * 60 * 1000;       // 1 hour
@@ -18,7 +29,7 @@ const state = {
   countdownTimer:  null,
   clockTimer:      null,
   isLoading:       false,
-  apiSource:       null,  // 'primary' | 'fallback' | 'cache'
+  apiSource:       null,  // 'realtime' | 'primary' | 'fallback' | 'cache'
   h52wSource:      null,  // 'fresh' | 'cache' | 'expired-cache' | 'none'
 };
 
@@ -84,9 +95,42 @@ async function fetchWithTimeout(url, ms = TIMEOUT_MS) {
   }
 }
 
+// ── Fetch: realtime rates (Yahoo Finance via CORS proxy) ──
+// Symbol "KRW=X" → USD/KRW, "CNY=X" → USD/CNY.
+async function fetchYahooSymbol(symbol) {
+  const target = `${YAHOO_BASE}${encodeURIComponent(symbol)}?interval=1d&range=1d`;
+  // Race the proxies: resolve on the first that succeeds, reject only if all fail.
+  const attempts = CORS_PROXIES.map(async (proxy) => {
+    const json  = await fetchWithTimeout(proxy + encodeURIComponent(target), RT_TIMEOUT_MS);
+    const price = json && json.chart && json.chart.result && json.chart.result[0]
+      && json.chart.result[0].meta && json.chart.result[0].meta.regularMarketPrice;
+    if (typeof price !== 'number' || !(price > 0)) throw new Error('No price in Yahoo response');
+    return price;
+  });
+  return Promise.any(attempts);
+}
+
+async function fetchRealtime() {
+  const [KRW, CNY] = await Promise.all([
+    fetchYahooSymbol('KRW=X'),
+    fetchYahooSymbol('CNY=X'),
+  ]);
+  return { KRW, CNY };
+}
+
 // ── Fetch: current rates ──────────────────────────────────
 async function fetchLatest() {
-  // 1. Primary API (frankfurter.dev)
+  // 0. Realtime source (Yahoo Finance, minute-level) — best effort, racey
+  try {
+    const rates = await fetchRealtime();
+    saveCache('er_latest', rates);
+    state.apiSource = 'realtime';
+    return rates;
+  } catch (e) {
+    console.warn('Realtime (Yahoo) failed:', e.message);
+  }
+
+  // 1. Primary API (frankfurter.dev — ECB daily reference rates)
   try {
     const json = await fetchWithTimeout(`${PRIMARY_URL}/latest?from=USD&to=KRW,CNY`);
     const rates = { KRW: json.rates.KRW, CNY: json.rates.CNY };
@@ -248,8 +292,11 @@ function updateFooter() {
   const badge = document.getElementById('source-badge');
   let label = '', cls = '';
 
-  if (state.apiSource === 'fallback') {
-    label = '백업 서버'; cls = 'src-fallback';
+  // 'realtime' (Yahoo) is the freshest source → no badge.
+  if (state.apiSource === 'primary') {
+    label = 'ECB 일일고시'; cls = 'src-primary';
+  } else if (state.apiSource === 'fallback') {
+    label = '백업 서버 (일 1회)'; cls = 'src-fallback';
   } else if (state.apiSource === 'cache') {
     label = '캐시 데이터'; cls = 'src-cache';
   }

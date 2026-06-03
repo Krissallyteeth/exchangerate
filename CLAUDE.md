@@ -29,16 +29,19 @@ init()
 
 ### API resilience (China VPN-off support)
 
-`fetchLatest()` tries three sources in order:
-1. `https://api.frankfurter.dev/v1/latest` (primary, ECB data)
-2. `https://open.er-api.com/v6/latest/USD` (fallback, more accessible in China)
-3. `localStorage` key `er_latest` (1h TTL, used as last resort)
+`fetchLatest()` tries four sources in order:
+1. **Realtime**: Yahoo Finance chart API (`KRW=X`, `CNY=X`) — minute-level rates, the only source close to what Google shows. Yahoo sends no CORS headers, so requests are routed through a public CORS proxy (`corsproxy.io` / `allorigins.win`, raced via `Promise.any`). Best-effort: blocked in China → falls through. Sets `apiSource = 'realtime'` (no footer badge — freshest).
+2. `https://api.frankfurter.dev/v1/latest` (ECB **daily** reference rates, ~16:00 CET, weekdays only). Footer badge "ECB 일일고시".
+3. `https://open.er-api.com/v6/latest/USD` (fallback, daily, more accessible in China).
+4. `localStorage` key `er_latest` (1h TTL, used as last resort).
+
+> Note: sources 2–4 are daily, not real-time. Footer badge signals when a non-realtime source is in use so the user understands any gap vs Google's live rate.
 
 `fetchHistorical()` for 52-week data:
 1. `frankfurter.dev` time-series endpoint (only source with free historical data)
 2. `localStorage` key `er_52w` (24h TTL, then expired cache as last resort)
 
-All fetches use `AbortController` with a 7-second timeout.
+Latest fetches use a 6s timeout for the realtime source (`RT_TIMEOUT_MS`, fail-fast so China falls back quickly) and a 7s timeout (`TIMEOUT_MS`) elsewhere, all via `AbortController`.
 
 ### Card state machine
 
