@@ -34,7 +34,6 @@ const state = {
   isLoading:       false,
   apiSource:       null,  // 'naver' | 'realtime' | 'primary' | 'fallback' | 'cache'
   h52wSource:      null,  // 'fresh' | 'cache' | 'expired-cache' | 'none'
-  diag:            [],    // TEMP DIAGNOSTIC: why realtime sources fell back
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -99,15 +98,6 @@ async function fetchWithTimeout(url, ms = TIMEOUT_MS) {
   }
 }
 
-// TEMP DIAGNOSTIC: human-readable reason a realtime source failed. Promise.any
-// rejects with an AggregateError whose `.errors` holds the per-proxy causes.
-function diagMsg(e) {
-  if (e && e.errors && e.errors.length) {
-    return e.errors.map((x) => (x && (x.message || String(x))) || 'unknown').join(' | ');
-  }
-  return (e && (e.message || String(e))) || 'unknown';
-}
-
 // Race a target URL across all CORS proxies: resolve with the first proxy
 // whose response passes `extract`, reject (AggregateError) only if all fail.
 function fetchViaProxies(target, extract) {
@@ -164,8 +154,6 @@ async function fetchRealtime() {
 
 // ── Fetch: current rates ──────────────────────────────────
 async function fetchLatest() {
-  state.diag = [];  // TEMP DIAGNOSTIC: reset per attempt
-
   // 0a. Naver (하나은행 매매기준율) — matches what Korean users see on Naver
   try {
     const rates = await fetchNaver();
@@ -174,7 +162,6 @@ async function fetchLatest() {
     return rates;
   } catch (e) {
     console.warn('Realtime (Naver) failed:', e.message);
-    state.diag.push('Naver ✕ ' + diagMsg(e));
   }
 
   // 0b. Yahoo Finance (global mid-market, minute-level) — best effort, racey
@@ -185,7 +172,6 @@ async function fetchLatest() {
     return rates;
   } catch (e) {
     console.warn('Realtime (Yahoo) failed:', e.message);
-    state.diag.push('Yahoo ✕ ' + diagMsg(e));
   }
 
   // 1. Primary API (frankfurter.dev — ECB daily reference rates)
@@ -375,9 +361,21 @@ function updateFooter() {
     badge.classList.add('hidden');
   }
 
-  // TEMP DIAGNOSTIC: surface why realtime sources fell back (visible on mobile).
-  const diagEl = document.getElementById('diag');
-  if (diagEl) diagEl.textContent = state.diag.length ? '진단: ' + state.diag.join('   ') : '';
+  updateDataCredit();
+}
+
+// Footer credit reflects the source actually in use (not a hardcoded label).
+const CREDIT_BY_SOURCE = {
+  naver:    '데이터: 하나은행 매매기준율 · 네이버 금융 (실시간)',
+  realtime: '데이터: Yahoo Finance (실시간)',
+  primary:  '데이터: European Central Bank (ECB) · frankfurter.dev (일일고시)',
+  fallback: '데이터: ExchangeRate-API (일 1회)',
+  cache:    '데이터: 캐시 (마지막 수신값)',
+};
+
+function updateDataCredit() {
+  const el = document.getElementById('data-credit');
+  if (el) el.textContent = CREDIT_BY_SOURCE[state.apiSource] || CREDIT_BY_SOURCE.primary;
 }
 
 // ── Main fetch orchestration ──────────────────────────────
