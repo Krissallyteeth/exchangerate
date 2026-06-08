@@ -6,23 +6,40 @@
 
 ## 주요 기능
 
-- 실시간 환율 표시 (5분마다 자동 갱신)
-- 52주 고가·저가 및 현재 위치 시각화 (범위 바)
-- 중국에서 VPN 없이도 작동 (API 폴백 + localStorage 캐시)
-- 반응형 디자인 (모바일·태블릿·데스크톱)
-- Apple 디자인 스타일
+- **실시간 환율** 표시 — 네이버(하나은행 매매기준율) 기준, 5분마다 자동 갱신
+- **52주 고가·저가** 및 현재 위치 시각화 (범위 바)
+- **데이터 출처 자동 표시** — 실제로 사용 중인 소스를 헤더 부제목과 푸터에 그대로 표기 (네이버 / Yahoo / ECB / …)
+- **새로고침 버튼** — 헤더 우측 상단과 푸터 양쪽에서 수동 갱신 (로딩 중 회전 애니메이션)
+- **중국에서 VPN 없이도 작동** — 다단계 API 폴백 + localStorage 캐시
+- 반응형 디자인 (모바일·태블릿·데스크톱), Apple 디자인 스타일
 
 ## 로컬 실행
 
-별도 설치 없이 `index.html`을 브라우저로 열면 됩니다.
-
-## 다른 기기에서 작업하기
+별도 설치나 빌드 단계가 없습니다. `index.html`을 브라우저로 열면 됩니다.
 
 ```bash
 git clone https://github.com/Krissallyteeth/exchangerate.git
+cd exchangerate
+open index.html   # 또는 브라우저로 파일 열기
 ```
 
 ## 데이터 출처
 
-- **현재 환율:** [frankfurter.dev](https://frankfurter.dev) (ECB 기준) → 실패 시 [ExchangeRate-API](https://open.er-api.com) 폴백
-- **52주 내역:** frankfurter.dev 시계열 API → 실패 시 localStorage 캐시 사용
+현재 환율은 아래 순서로 시도하며, 앞 소스가 실패하면 다음으로 폴백합니다. 실제 사용된 소스는 화면(헤더 부제목·푸터)에 표시됩니다.
+
+1. **네이버 금융** — 하나은행 매매기준율 (`FX_USDKRW`, `FX_CNYKRW`). 네이버에 표시되는 값과 동일한 **실시간** 환율
+2. **Yahoo Finance** — 글로벌 시장 중간환율 (분 단위, 구글에 가까움)
+3. **[frankfurter.dev](https://frankfurter.dev)** — ECB 일일 기준환율 (평일 1회 고시)
+4. **[ExchangeRate-API](https://open.er-api.com)** — 일 1회 갱신, 중국 접근성 양호
+5. **localStorage 캐시** — 마지막 수신값 (최후 수단)
+
+> 네이버·Yahoo는 CORS 헤더를 보내지 않아 공개 CORS 프록시(`corsproxy.io` / `allorigins.win` / `codetabs.com`)를 통해 가져오며, 모두 실패하면(예: 중국) 자동으로 ECB 등 일일 소스로 폴백됩니다. 일일 소스가 쓰이는 경우 푸터에 배지로 안내됩니다.
+
+**52주 내역:** frankfurter.dev 시계열 API → 실패 시 localStorage 캐시(24h TTL) 사용
+
+## 구조
+
+빌드 없이 두 파일로 동작합니다.
+
+- `index.html` — 마크업 + 인라인 CSS (외부 CSS 의존성 없음 — 중국에서도 동작)
+- `app.js` — API 호출·상태·렌더링·시계·자동 갱신 로직
