@@ -287,16 +287,19 @@ function renderCard(pairId, current, range) {
   rangeEl.classList.remove('hidden');
   rangeNaEl.classList.add('hidden');
 
-  document.getElementById(`low-${pairId}`).textContent  = formatRate(pairId, range.low);
-  document.getElementById(`high-${pairId}`).textContent = formatRate(pairId, range.high);
+  // History is ECB (frankfurter), but the live current rate is Naver/Yahoo.
+  // Today is within the trailing 52 weeks, so fold the live value into the
+  // observed extremes: the displayed high/low (and the marker) then stay
+  // consistent with the live rate and update the moment it breaches the range.
+  const newHigh = current > range.high;   // live rate set a fresh 52-week high
+  const newLow  = current < range.low;    // live rate set a fresh 52-week low
+  const low  = Math.min(range.low, current);
+  const high = Math.max(range.high, current);
 
-  let pct;
-  if (range.high === range.low) {
-    pct = 50;
-  } else {
-    pct = ((current - range.low) / (range.high - range.low)) * 100;
-  }
-  const rawPct     = pct;
+  document.getElementById(`low-${pairId}`).textContent  = formatRate(pairId, low);
+  document.getElementById(`high-${pairId}`).textContent = formatRate(pairId, high);
+
+  const pct = (high === low) ? 50 : ((current - low) / (high - low)) * 100;
   const clampedPct = Math.min(100, Math.max(0, pct));
 
   document.getElementById(`bar-fill-${pairId}`).style.width = `${clampedPct}%`;
@@ -309,11 +312,11 @@ function renderCard(pairId, current, range) {
   else if (clampedPct <= 20) marker.classList.add('marker-green');
 
   const badge = document.getElementById(`badge-${pairId}`);
-  if (rawPct > 100) {
+  if (newHigh) {
     badge.textContent = '52W 최고';
     badge.className = 'badge badge-high';
     badge.classList.remove('hidden');
-  } else if (rawPct < 0) {
+  } else if (newLow) {
     badge.textContent = '52W 최저';
     badge.className = 'badge badge-low';
     badge.classList.remove('hidden');
