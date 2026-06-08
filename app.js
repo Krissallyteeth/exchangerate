@@ -3,6 +3,7 @@ const PRIMARY_URL   = 'https://api.frankfurter.dev/v1';
 const FALLBACK_URL  = 'https://open.er-api.com/v6/latest/USD';
 const TIMEOUT_MS    = 7000;
 const RT_TIMEOUT_MS = 6000;   // realtime source: fail fast so we fall back quickly (e.g. in China)
+const HIST_TIMEOUT_MS = 9000; // 52-week history: larger payload, allow a bit more time
 
 // Realtime sources (routed through a raced pool of public CORS proxies, since
 // neither Naver nor Yahoo sends CORS headers). If all proxies fail (e.g. blocked
@@ -17,8 +18,9 @@ const CORS_PROXIES  = [
   'https://api.codetabs.com/v1/proxy/?quest=',
 ];
 const REFRESH_MS    = 5 * 60 * 1000;   // 5 minutes
-const CACHE_52W_TTL = 24 * 60 * 60 * 1000;  // 24 hours
-const CACHE_NOW_TTL = 60 * 60 * 1000;       // 1 hour
+const CACHE_52W_TTL       = 24 * 60 * 60 * 1000;  // 24 hours (cache usable as fallback)
+const CACHE_52W_FETCH_TTL = 6 * 60 * 60 * 1000;   // 6 hours (re-pull history at most this often)
+const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
 
@@ -99,15 +101,19 @@ async function fetchWithTimeout(url, ms = TIMEOUT_MS) {
 }
 
 // Race a target URL across all CORS proxies: resolve with the first proxy
-// whose response passes `extract`, reject (AggregateError) only if all fail.
-function fetchViaProxies(target, extract) {
+// whose `extract` returns a usable value, reject (AggregateError) only if all
+// fail. `extract` must throw if the response is unusable.
+function fetchViaProxies(target, extract, ms = RT_TIMEOUT_MS) {
   const attempts = CORS_PROXIES.map(async (proxy) => {
-    const json  = await fetchWithTimeout(proxy + encodeURIComponent(target), RT_TIMEOUT_MS);
-    const value = extract(json);
-    if (typeof value !== 'number' || !(value > 0)) throw new Error('No usable value in response');
-    return value;
+    const json = await fetchWithTimeout(proxy + encodeURIComponent(target), ms);
+    return extract(json);
   });
   return Promise.any(attempts);
+}
+
+function asRate(value) {
+  if (typeof value !== 'number' || !(value > 0)) throw new Error('No usable value in response');
+  return value;
 }
 
 // ── Fetch: realtime rates (Naver — 하나은행 매매기준율) ──
@@ -117,7 +123,7 @@ async function fetchNaverPrice(reutersCode) {
     // front-api returns { result: [{ closePrice }] }; older api returns { closePrice }.
     const node = (json && json.result && json.result[0]) || json;
     const raw  = node && node.closePrice;
-    return parseFloat(String(raw).replace(/[^0-9.]/g, ''));  // strip thousands separators
+    return asRate(parseFloat(String(raw).replace(/[^0-9.]/g, '')));  // strip thousands separators
   });
 }
 
@@ -140,8 +146,8 @@ async function fetchNaver() {
 async function fetchYahooSymbol(symbol) {
   const target = `${YAHOO_BASE}${encodeURIComponent(symbol)}?interval=1d&range=1d`;
   return fetchViaProxies(target, (json) =>
-    json && json.chart && json.chart.result && json.chart.result[0]
-      && json.chart.result[0].meta && json.chart.result[0].meta.regularMarketPrice);
+    asRate(json && json.chart && json.chart.result && json.chart.result[0]
+      && json.chart.result[0].meta && json.chart.result[0].meta.regularMarketPrice));
 }
 
 async function fetchRealtime() {
@@ -207,6 +213,55 @@ async function fetchLatest() {
 }
 
 // ── Fetch: 52-week historical ─────────────────────────────
+const minOf = (arr) => Math.min(...arr.filter(Number.isFinite));
+const maxOf = (arr) => Math.max(...arr.filter(Number.isFinite));
+
+// 52-week high/low from Yahoo daily OHLC. Unlike ECB's single daily fixing,
+// this captures true intraday extremes and is the same global mid Google /
+// Morningstar show — so the range matches what users compare against.
+async function fetchYahooHistory(symbol) {
+  const target = `${YAHOO_BASE}${encodeURIComponent(symbol)}?interval=1d&range=1y`;
+  return fetchViaProxies(target, (json) => {
+    const r = json && json.chart && json.chart.result && json.chart.result[0];
+    const q = r && r.indicators && r.indicators.quote && r.indicators.quote[0];
+    if (!q || !Array.isArray(q.high) || !Array.isArray(q.low) || !Array.isArray(q.close)) {
+      throw new Error('No OHLC in Yahoo history');
+    }
+    return { high: q.high, low: q.low, close: q.close };
+  }, HIST_TIMEOUT_MS);
+}
+
+async function fetch52WFromYahoo() {
+  const [krw, cny] = await Promise.all([
+    fetchYahooHistory('KRW=X'),  // USD/KRW daily OHLC
+    fetchYahooHistory('CNY=X'),  // USD/CNY daily OHLC
+  ]);
+  const usdKrw = { low: minOf(krw.low), high: maxOf(krw.high) };
+  const usdCny = { low: minOf(cny.low), high: maxOf(cny.high) };
+  // cny-krw: KRW/CNY per day from closes (ratio extremes ≠ ratios of extremes),
+  // index-aligned across the two series.
+  const cnyKrw = [];
+  const n = Math.min(krw.close.length, cny.close.length);
+  for (let i = 0; i < n; i++) {
+    const k = krw.close[i], c = cny.close[i];
+    if (Number.isFinite(k) && Number.isFinite(c) && c > 0) cnyKrw.push(k / c);
+  }
+  if (!cnyKrw.length) throw new Error('Empty Yahoo history');
+  const data = {
+    'usd-krw': usdKrw,
+    'usd-cny': usdCny,
+    'cny-krw': { low: Math.min(...cnyKrw), high: Math.max(...cnyKrw) },
+  };
+  // Sanity guards: bail (→ fall back to ECB) if anything is non-finite/absurd.
+  if (!(usdKrw.low > 500 && usdKrw.high < 3000 && usdKrw.low <= usdKrw.high)) {
+    throw new Error('USD/KRW 52w out of sane range');
+  }
+  if (!(usdCny.low > 3 && usdCny.high < 12 && usdCny.low <= usdCny.high)) {
+    throw new Error('USD/CNY 52w out of sane range');
+  }
+  return data;
+}
+
 function compute52W(json) {
   const usdKrw = [], usdCny = [], cnyKrw = [];
   for (const rates of Object.values(json.rates)) {
@@ -225,7 +280,25 @@ function compute52W(json) {
 }
 
 async function fetchHistorical() {
-  // 1. Try primary API for fresh 52W data
+  // 0. Reuse a recent cache — 52-week extremes barely change intraday, so we
+  //    don't re-pull a full year of history on every 5-min refresh (saves data).
+  const recent = loadCache('er_52w', CACHE_52W_FETCH_TTL, false);
+  if (recent) {
+    state.h52wSource = 'fresh';
+    return recent.data;
+  }
+
+  // 1. Yahoo daily OHLC — true 52-week high/low (global mid, ~Google/Morningstar)
+  try {
+    const data = await fetch52WFromYahoo();
+    saveCache('er_52w', data);
+    state.h52wSource = 'fresh';
+    return data;
+  } catch (e) {
+    console.warn('52W (Yahoo) failed:', e.message);
+  }
+
+  // 2. frankfurter (ECB daily reference) — fallback historical source
   const end   = new Date();
   const start = new Date(end.getTime() - 365 * 24 * 60 * 60 * 1000);
   try {
@@ -237,17 +310,17 @@ async function fetchHistorical() {
     state.h52wSource = 'fresh';
     return data;
   } catch (e) {
-    console.warn('Historical API failed:', e.message);
+    console.warn('52W (frankfurter) failed:', e.message);
   }
 
-  // 2. LocalStorage cache (valid within 24h)
+  // 3. LocalStorage cache (valid within 24h)
   const fresh = loadCache('er_52w', CACHE_52W_TTL, false);
   if (fresh) {
     state.h52wSource = 'cache';
     return fresh.data;
   }
 
-  // 3. Expired cache (any age) — better than nothing
+  // 4. Expired cache (any age) — better than nothing
   const stale = loadCache('er_52w', CACHE_52W_TTL, true);
   if (stale) {
     state.h52wSource = 'expired-cache';
