@@ -21,6 +21,7 @@ const REFRESH_MS    = 5 * 60 * 1000;   // 5 minutes
 const CACHE_52W_TTL       = 24 * 60 * 60 * 1000;  // 24 hours (cache usable as fallback)
 const CACHE_52W_FETCH_TTL = 6 * 60 * 60 * 1000;   // 6 hours (re-pull history at most this often)
 const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
+const CACHE_52W_KEY       = 'er_52w_v2';          // bumped: drop old ECB-based caches
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
 
@@ -35,7 +36,7 @@ const state = {
   clockTimer:      null,
   isLoading:       false,
   apiSource:       null,  // 'naver' | 'realtime' | 'primary' | 'fallback' | 'cache'
-  h52wSource:      null,  // 'fresh' | 'cache' | 'expired-cache' | 'none'
+  h52wSource:      null,  // 'yahoo' | 'ecb' | 'expired-cache' | 'none'
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -251,6 +252,7 @@ async function fetch52WFromYahoo() {
     'usd-krw': usdKrw,
     'usd-cny': usdCny,
     'cny-krw': { low: Math.min(...cnyKrw), high: Math.max(...cnyKrw) },
+    _src: 'yahoo',  // tag the source so the footer can flag ECB fallbacks
   };
   // Sanity guards: bail (→ fall back to ECB) if anything is non-finite/absurd.
   if (!(usdKrw.low > 500 && usdKrw.high < 3000 && usdKrw.low <= usdKrw.high)) {
@@ -279,26 +281,30 @@ function compute52W(json) {
   };
 }
 
+// h52wSource reflects how accurate the 52-week range is: 'yahoo' (intraday
+// extremes, best) vs 'ecb' (daily fixings, range comes out narrow).
+const h52wFromCache = (data) => (data && data._src === 'yahoo') ? 'yahoo' : 'ecb';
+
 async function fetchHistorical() {
   // 0. Reuse a recent cache — 52-week extremes barely change intraday, so we
   //    don't re-pull a full year of history on every 5-min refresh (saves data).
-  const recent = loadCache('er_52w', CACHE_52W_FETCH_TTL, false);
+  const recent = loadCache(CACHE_52W_KEY, CACHE_52W_FETCH_TTL, false);
   if (recent) {
-    state.h52wSource = 'fresh';
+    state.h52wSource = h52wFromCache(recent.data);
     return recent.data;
   }
 
   // 1. Yahoo daily OHLC — true 52-week high/low (global mid, ~Google/Morningstar)
   try {
     const data = await fetch52WFromYahoo();
-    saveCache('er_52w', data);
-    state.h52wSource = 'fresh';
+    saveCache(CACHE_52W_KEY, data);
+    state.h52wSource = 'yahoo';
     return data;
   } catch (e) {
     console.warn('52W (Yahoo) failed:', e.message);
   }
 
-  // 2. frankfurter (ECB daily reference) — fallback historical source
+  // 2. frankfurter (ECB daily reference) — fallback; range will be narrower
   const end   = new Date();
   const start = new Date(end.getTime() - 365 * 24 * 60 * 60 * 1000);
   try {
@@ -306,22 +312,23 @@ async function fetchHistorical() {
       `${PRIMARY_URL}/${formatDate(start)}..${formatDate(end)}?from=USD&to=KRW,CNY`
     );
     const data = compute52W(json);
-    saveCache('er_52w', data);
-    state.h52wSource = 'fresh';
+    data._src = 'ecb';
+    saveCache(CACHE_52W_KEY, data);
+    state.h52wSource = 'ecb';
     return data;
   } catch (e) {
     console.warn('52W (frankfurter) failed:', e.message);
   }
 
   // 3. LocalStorage cache (valid within 24h)
-  const fresh = loadCache('er_52w', CACHE_52W_TTL, false);
+  const fresh = loadCache(CACHE_52W_KEY, CACHE_52W_TTL, false);
   if (fresh) {
-    state.h52wSource = 'cache';
+    state.h52wSource = h52wFromCache(fresh.data);
     return fresh.data;
   }
 
   // 4. Expired cache (any age) — better than nothing
-  const stale = loadCache('er_52w', CACHE_52W_TTL, true);
+  const stale = loadCache(CACHE_52W_KEY, CACHE_52W_TTL, true);
   if (stale) {
     state.h52wSource = 'expired-cache';
     return stale.data;
@@ -421,7 +428,12 @@ function updateFooter() {
     label = '캐시 데이터'; cls = 'src-cache';
   }
 
-  if (state.h52wSource === 'expired-cache') {
+  if (state.h52wSource === 'ecb') {
+    // Yahoo history unavailable → range is ECB daily fixings (narrower, may miss
+    // intraday peaks). Flag it so the 52-week numbers aren't taken as exact.
+    label = label ? `${label} · 52주 ECB(근사)` : '52주 ECB(근사)';
+    cls = cls || 'src-cache';
+  } else if (state.h52wSource === 'expired-cache') {
     label = label ? `${label} · 52주 구캐시` : '52주 구캐시';
     cls = cls || 'src-cache';
   } else if (state.h52wSource === 'none') {
