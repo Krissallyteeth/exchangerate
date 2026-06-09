@@ -178,6 +178,14 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .range-delta {
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      margin-left: 3px;
+    }
+    .delta-up   { color: #30d158; }  /* current above 52W low  */
+    .delta-down { color: #ff3b30; }  /* current below 52W high */
+
     .range-track {
       position: relative;
       height: 5px;
@@ -446,8 +454,8 @@
             <div class="rate-desc">Korean Won per 1 US Dollar</div>
             <div id="range-usd-krw">
               <div class="range-labels">
-                <span>52W Low: <strong id="low-usd-krw"></strong></span>
-                <span>52W High: <strong id="high-usd-krw"></strong></span>
+                <span>52W Low: <strong id="low-usd-krw"></strong> <span class="range-delta delta-up" id="lowd-usd-krw"></span></span>
+                <span>52W High: <strong id="high-usd-krw"></strong> <span class="range-delta delta-down" id="highd-usd-krw"></span></span>
               </div>
               <div class="range-track">
                 <div id="bar-fill-usd-krw" class="range-fill"></div>
@@ -488,8 +496,8 @@
             <div class="rate-desc">Korean Won per 1 Chinese Yuan</div>
             <div id="range-cny-krw">
               <div class="range-labels">
-                <span>52W Low: <strong id="low-cny-krw"></strong></span>
-                <span>52W High: <strong id="high-cny-krw"></strong></span>
+                <span>52W Low: <strong id="low-cny-krw"></strong> <span class="range-delta delta-up" id="lowd-cny-krw"></span></span>
+                <span>52W High: <strong id="high-cny-krw"></strong> <span class="range-delta delta-down" id="highd-cny-krw"></span></span>
               </div>
               <div class="range-track">
                 <div id="bar-fill-cny-krw" class="range-fill"></div>
@@ -530,8 +538,8 @@
             <div class="rate-desc">Chinese Yuan per 1 US Dollar</div>
             <div id="range-usd-cny">
               <div class="range-labels">
-                <span>52W Low: <strong id="low-usd-cny"></strong></span>
-                <span>52W High: <strong id="high-usd-cny"></strong></span>
+                <span>52W Low: <strong id="low-usd-cny"></strong> <span class="range-delta delta-up" id="lowd-usd-cny"></span></span>
+                <span>52W High: <strong id="high-usd-cny"></strong> <span class="range-delta delta-down" id="highd-usd-cny"></span></span>
               </div>
               <div class="range-track">
                 <div id="bar-fill-usd-cny" class="range-fill"></div>

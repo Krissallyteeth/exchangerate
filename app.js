@@ -3,7 +3,7 @@ const PRIMARY_URL   = 'https://api.frankfurter.dev/v1';
 const FALLBACK_URL  = 'https://open.er-api.com/v6/latest/USD';
 const TIMEOUT_MS    = 7000;
 const RT_TIMEOUT_MS = 6000;   // realtime source: fail fast so we fall back quickly (e.g. in China)
-const HIST_TIMEOUT_MS = 9000; // 52-week history: larger payload, allow a bit more time
+const HIST_TIMEOUT_MS = 12000; // 52-week history: larger payload, allow more time (mobile)
 
 // Realtime sources (routed through a raced pool of public CORS proxies, since
 // neither Naver nor Yahoo sends CORS headers). If all proxies fail (e.g. blocked
@@ -286,11 +286,13 @@ function compute52W(json) {
 const h52wFromCache = (data) => (data && data._src === 'yahoo') ? 'yahoo' : 'ecb';
 
 async function fetchHistorical() {
-  // 0. Reuse a recent cache — 52-week extremes barely change intraday, so we
-  //    don't re-pull a full year of history on every 5-min refresh (saves data).
+  // 0. Reuse a recent *Yahoo* cache — accurate 52W extremes barely change
+  //    intraday, so we skip re-pulling a year of history on every 5-min refresh
+  //    (saves data). An ECB cache is NOT reused: keep retrying Yahoo so we
+  //    upgrade from the narrow ECB range to the accurate one as soon as possible.
   const recent = loadCache(CACHE_52W_KEY, CACHE_52W_FETCH_TTL, false);
-  if (recent) {
-    state.h52wSource = h52wFromCache(recent.data);
+  if (recent && recent.data && recent.data._src === 'yahoo') {
+    state.h52wSource = 'yahoo';
     return recent.data;
   }
 
@@ -378,6 +380,12 @@ function renderCard(pairId, current, range) {
 
   document.getElementById(`low-${pairId}`).textContent  = formatRate(pairId, low);
   document.getElementById(`high-${pairId}`).textContent = formatRate(pairId, high);
+
+  // How far the current rate sits above the 52W low and below the 52W high.
+  const aboveLow  = low  > 0 ? ((current - low)  / low)  * 100 : 0;   // ≥ 0
+  const belowHigh = high > 0 ? ((current - high) / high) * 100 : 0;   // ≤ 0
+  document.getElementById(`lowd-${pairId}`).textContent  = `+${aboveLow.toFixed(1)}%`;
+  document.getElementById(`highd-${pairId}`).textContent = `${belowHigh.toFixed(1)}%`;
 
   const pct = (high === low) ? 50 : ((current - low) / (high - low)) * 100;
   const clampedPct = Math.min(100, Math.max(0, pct));
