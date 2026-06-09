@@ -35,7 +35,7 @@ open index.html   # 또는 브라우저로 파일 열기
 
 > 네이버·Yahoo는 CORS 헤더를 보내지 않아 공개 CORS 프록시(`corsproxy.io` / `allorigins.win` / `codetabs.com`)를 통해 가져오며, 모두 실패하면(예: 중국) 자동으로 ECB 등 일일 소스로 폴백됩니다. 일일 소스가 쓰이는 경우 푸터에 배지로 안내됩니다.
 
-**52주 내역:** Yahoo 1년치 일별 OHLC(고가/저가) → 실패 시 [frankfurter.dev](https://frankfurter.dev)(ECB 1년치) → localStorage 캐시
+**52주 내역:** 일별 OHLC(고가/저가) — [Stooq](https://stooq.com)·Yahoo 동시 시도(먼저 응답하는 쪽) → 실패 시 [frankfurter.dev](https://frankfurter.dev)(ECB 1년치, 근사) → localStorage 캐시
 
 > Yahoo의 일별 고가·저가는 장중 극단값을 반영해 구글/Morningstar가 보여주는 52주 범위와 일치합니다(ECB 일일 고시값은 범위가 좁게 나옴). 여기에 **오늘의 실시간값도 구간에 포함**해, 현재값이 범위를 벗어나면 최고/최저와 막대가 즉시 갱신되고 실제 신규 극단값일 때만 "52W 최고/최저" 배지가 표시됩니다. 1년치 재요청은 데이터 절약을 위해 최대 6시간에 1회로 제한합니다. Yahoo 과거를 못 받아 ECB로 폴백한 경우(범위가 근사치)에는 푸터에 `52주 ECB(근사)` 배지로 안내합니다.
 

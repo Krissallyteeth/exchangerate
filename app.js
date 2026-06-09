@@ -12,6 +12,7 @@ const HIST_TIMEOUT_MS = 12000; // 52-week history: larger payload, allow more ti
 //   - Yahoo Finance:  global mid-market rate, minute-level.
 const NAVER_BASE    = 'https://m.stock.naver.com/front-api/marketIndex/prices?category=exchange&page=1&reutersCode=';
 const YAHOO_BASE    = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+const STOOQ_BASE    = 'https://stooq.com/q/d/l/?i=d&s=';  // daily OHLC CSV (52-week history)
 const CORS_PROXIES  = [
   'https://corsproxy.io/?url=',
   'https://api.allorigins.win/raw?url=',
@@ -36,7 +37,7 @@ const state = {
   clockTimer:      null,
   isLoading:       false,
   apiSource:       null,  // 'naver' | 'realtime' | 'primary' | 'fallback' | 'cache'
-  h52wSource:      null,  // 'yahoo' | 'ecb' | 'expired-cache' | 'none'
+  h52wSource:      null,  // 'stooq' | 'yahoo' | 'ecb' | 'expired-cache' | 'none'
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -95,6 +96,21 @@ async function fetchWithTimeout(url, ms = TIMEOUT_MS) {
     clearTimeout(timer);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
+}
+
+// Same as fetchWithTimeout but returns the raw body text (for CSV sources).
+async function fetchTextWithTimeout(url, ms = TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.text();
   } catch (err) {
     clearTimeout(timer);
     throw err;
@@ -217,9 +233,38 @@ async function fetchLatest() {
 const minOf = (arr) => Math.min(...arr.filter(Number.isFinite));
 const maxOf = (arr) => Math.max(...arr.filter(Number.isFinite));
 
-// 52-week high/low from Yahoo daily OHLC. Unlike ECB's single daily fixing,
-// this captures true intraday extremes and is the same global mid Google /
-// Morningstar show — so the range matches what users compare against.
+// Build the 52-week ranges from two daily OHLC series (USD/KRW and USD/CNY).
+// Daily high/low capture true intraday extremes (unlike ECB's single fixing),
+// so the range matches what Google/Morningstar show. `_src` tags the source.
+function build52W(krw, cny, src) {
+  const usdKrw = { low: minOf(krw.low), high: maxOf(krw.high) };
+  const usdCny = { low: minOf(cny.low), high: maxOf(cny.high) };
+  // cny-krw: KRW/CNY per day from closes (ratio extremes ≠ ratios of extremes),
+  // index-aligned across the two series.
+  const cnyKrw = [];
+  const n = Math.min(krw.close.length, cny.close.length);
+  for (let i = 0; i < n; i++) {
+    const k = krw.close[i], c = cny.close[i];
+    if (Number.isFinite(k) && Number.isFinite(c) && c > 0) cnyKrw.push(k / c);
+  }
+  if (!cnyKrw.length) throw new Error('Empty history');
+  const data = {
+    'usd-krw': usdKrw,
+    'usd-cny': usdCny,
+    'cny-krw': { low: Math.min(...cnyKrw), high: Math.max(...cnyKrw) },
+    _src: src,
+  };
+  // Sanity guards: bail (→ try next source) if anything is non-finite/absurd.
+  if (!(usdKrw.low > 500 && usdKrw.high < 3000 && usdKrw.low <= usdKrw.high)) {
+    throw new Error('USD/KRW 52w out of sane range');
+  }
+  if (!(usdCny.low > 3 && usdCny.high < 12 && usdCny.low <= usdCny.high)) {
+    throw new Error('USD/CNY 52w out of sane range');
+  }
+  return data;
+}
+
+// --- Yahoo daily OHLC (global mid; often blocked from proxy IPs, so secondary)
 async function fetchYahooHistory(symbol) {
   const target = `${YAHOO_BASE}${encodeURIComponent(symbol)}?interval=1d&range=1y`;
   return fetchViaProxies(target, (json) => {
@@ -234,34 +279,45 @@ async function fetchYahooHistory(symbol) {
 
 async function fetch52WFromYahoo() {
   const [krw, cny] = await Promise.all([
-    fetchYahooHistory('KRW=X'),  // USD/KRW daily OHLC
-    fetchYahooHistory('CNY=X'),  // USD/CNY daily OHLC
+    fetchYahooHistory('KRW=X'),  // USD/KRW
+    fetchYahooHistory('CNY=X'),  // USD/CNY
   ]);
-  const usdKrw = { low: minOf(krw.low), high: maxOf(krw.high) };
-  const usdCny = { low: minOf(cny.low), high: maxOf(cny.high) };
-  // cny-krw: KRW/CNY per day from closes (ratio extremes ≠ ratios of extremes),
-  // index-aligned across the two series.
-  const cnyKrw = [];
-  const n = Math.min(krw.close.length, cny.close.length);
-  for (let i = 0; i < n; i++) {
-    const k = krw.close[i], c = cny.close[i];
-    if (Number.isFinite(k) && Number.isFinite(c) && c > 0) cnyKrw.push(k / c);
+  return build52W(krw, cny, 'yahoo');
+}
+
+// --- Stooq daily OHLC CSV (Date,Open,High,Low,Close) — proxy-friendly
+function parseStooqCsv(csv) {
+  const lines = String(csv).trim().split('\n');
+  if (lines.length < 30 || !/date/i.test(lines[0])) throw new Error('Bad Stooq CSV');
+  const high = [], low = [], close = [];
+  for (let i = 1; i < lines.length; i++) {
+    const c = lines[i].split(',');
+    high.push(parseFloat(c[2]));
+    low.push(parseFloat(c[3]));
+    close.push(parseFloat(c[4]));
   }
-  if (!cnyKrw.length) throw new Error('Empty Yahoo history');
-  const data = {
-    'usd-krw': usdKrw,
-    'usd-cny': usdCny,
-    'cny-krw': { low: Math.min(...cnyKrw), high: Math.max(...cnyKrw) },
-    _src: 'yahoo',  // tag the source so the footer can flag ECB fallbacks
-  };
-  // Sanity guards: bail (→ fall back to ECB) if anything is non-finite/absurd.
-  if (!(usdKrw.low > 500 && usdKrw.high < 3000 && usdKrw.low <= usdKrw.high)) {
-    throw new Error('USD/KRW 52w out of sane range');
-  }
-  if (!(usdCny.low > 3 && usdCny.high < 12 && usdCny.low <= usdCny.high)) {
-    throw new Error('USD/CNY 52w out of sane range');
-  }
-  return data;
+  return { high, low, close };
+}
+
+async function fetchStooqHistory(symbol, range) {
+  const target = `${STOOQ_BASE}${symbol}${range}`;
+  const attempts = CORS_PROXIES.map(async (proxy) => {
+    const csv = await fetchTextWithTimeout(proxy + encodeURIComponent(target), HIST_TIMEOUT_MS);
+    return parseStooqCsv(csv);
+  });
+  return Promise.any(attempts);
+}
+
+async function fetch52WFromStooq() {
+  const d2 = new Date();
+  const d1 = new Date(d2.getTime() - 365 * 24 * 60 * 60 * 1000);
+  const ymd = (d) => formatDate(d).replace(/-/g, '');
+  const range = `&d1=${ymd(d1)}&d2=${ymd(d2)}`;
+  const [krw, cny] = await Promise.all([
+    fetchStooqHistory('usdkrw', range),  // USD/KRW
+    fetchStooqHistory('usdcny', range),  // USD/CNY
+  ]);
+  return build52W(krw, cny, 'stooq');
 }
 
 function compute52W(json) {
@@ -281,29 +337,32 @@ function compute52W(json) {
   };
 }
 
-// h52wSource reflects how accurate the 52-week range is: 'yahoo' (intraday
-// extremes, best) vs 'ecb' (daily fixings, range comes out narrow).
-const h52wFromCache = (data) => (data && data._src === 'yahoo') ? 'yahoo' : 'ecb';
+// 52W ranges from intraday OHLC (Stooq/Yahoo) are accurate; ECB daily fixings
+// are a narrower approximation. h52wSource carries the actual source so the
+// footer can flag the ECB fallback.
+const ACCURATE_52W = new Set(['stooq', 'yahoo']);
+const h52wFromCache = (data) => (data && ACCURATE_52W.has(data._src)) ? data._src : 'ecb';
 
 async function fetchHistorical() {
-  // 0. Reuse a recent *Yahoo* cache — accurate 52W extremes barely change
-  //    intraday, so we skip re-pulling a year of history on every 5-min refresh
-  //    (saves data). An ECB cache is NOT reused: keep retrying Yahoo so we
+  // 0. Reuse a recent *accurate* cache — those extremes barely change intraday,
+  //    so we skip re-pulling a year of history on every 5-min refresh (saves
+  //    data). An ECB cache is NOT reused: keep retrying the OHLC sources so we
   //    upgrade from the narrow ECB range to the accurate one as soon as possible.
   const recent = loadCache(CACHE_52W_KEY, CACHE_52W_FETCH_TTL, false);
-  if (recent && recent.data && recent.data._src === 'yahoo') {
-    state.h52wSource = 'yahoo';
+  if (recent && recent.data && ACCURATE_52W.has(recent.data._src)) {
+    state.h52wSource = recent.data._src;
     return recent.data;
   }
 
-  // 1. Yahoo daily OHLC — true 52-week high/low (global mid, ~Google/Morningstar)
+  // 1. Daily OHLC — true intraday 52-week high/low. Race Stooq and Yahoo and
+  //    take whichever responds first (Yahoo is often blocked from proxy IPs).
   try {
-    const data = await fetch52WFromYahoo();
+    const data = await Promise.any([fetch52WFromStooq(), fetch52WFromYahoo()]);
     saveCache(CACHE_52W_KEY, data);
-    state.h52wSource = 'yahoo';
+    state.h52wSource = data._src;
     return data;
   } catch (e) {
-    console.warn('52W (Yahoo) failed:', e.message);
+    console.warn('52W (Stooq/Yahoo) failed:', e && e.message);
   }
 
   // 2. frankfurter (ECB daily reference) — fallback; range will be narrower
