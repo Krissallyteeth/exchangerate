@@ -11,6 +11,7 @@ const HIST_TIMEOUT_MS = 12000; // 52-week history: larger payload, allow more ti
 //   - Naver Finance: 하나은행 매매기준율 — exactly what Naver shows Korean users.
 //   - Yahoo Finance:  global mid-market rate, minute-level.
 const NAVER_BASE    = 'https://m.stock.naver.com/front-api/marketIndex/prices?category=exchange&page=1&reutersCode=';
+const NAVER_HIST    = 'https://m.stock.naver.com/front-api/marketIndex/prices?category=exchange&page=1&pageSize=366&reutersCode=';  // ~1y daily history
 const YAHOO_BASE    = 'https://query1.finance.yahoo.com/v8/finance/chart/';
 const STOOQ_BASE    = 'https://stooq.com/q/d/l/?i=d&s=';  // daily OHLC CSV (52-week history)
 const CORS_PROXIES  = [
@@ -37,7 +38,7 @@ const state = {
   clockTimer:      null,
   isLoading:       false,
   apiSource:       null,  // 'naver' | 'realtime' | 'primary' | 'fallback' | 'cache'
-  h52wSource:      null,  // 'stooq' | 'yahoo' | 'ecb' | 'expired-cache' | 'none'
+  h52wSource:      null,  // 'naver' | 'stooq' | 'yahoo' | 'ecb' | 'expired-cache' | 'none'
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -320,6 +321,61 @@ async function fetch52WFromStooq() {
   return build52W(krw, cny, 'stooq');
 }
 
+// --- Naver daily history (matches what users see on Naver; uses the same proxy
+// path that already works for the live Naver rate). Rows give closePrice and,
+// when present, intraday highPrice/lowPrice.
+const naverNum = (s) => parseFloat(String(s).replace(/[^0-9.]/g, ''));
+
+async function fetchNaverHistory(reutersCode) {
+  return fetchViaProxies(NAVER_HIST + reutersCode, (json) => {
+    const rows = json && json.result;
+    if (!Array.isArray(rows) || rows.length < 180) throw new Error('Naver history too short');
+    const high = [], low = [], close = [];
+    for (const r of rows) {
+      const c = naverNum(r.closePrice);
+      if (!Number.isFinite(c)) continue;
+      const h = r.highPrice != null ? naverNum(r.highPrice) : c;  // fall back to close
+      const l = r.lowPrice  != null ? naverNum(r.lowPrice)  : c;
+      close.push(c);
+      high.push(Number.isFinite(h) ? h : c);
+      low.push(Number.isFinite(l) ? l : c);
+    }
+    if (close.length < 180) throw new Error('Naver history too short');
+    return { high, low, close };
+  }, HIST_TIMEOUT_MS);
+}
+
+async function fetch52WFromNaver() {
+  // FX_USDKRW and FX_CNYKRW are both Naver-native (하나은행 기준).
+  const [usdkrw, cnykrw] = await Promise.all([
+    fetchNaverHistory('FX_USDKRW'),
+    fetchNaverHistory('FX_CNYKRW'),
+  ]);
+  const usdKrw = { low: minOf(usdkrw.low), high: maxOf(usdkrw.high) };
+  const cnyKrw = { low: minOf(cnykrw.low), high: maxOf(cnykrw.high) };  // direct, matches Naver
+  // usd-cny: USDKRW / CNYKRW per day, index-aligned.
+  const usdCnyVals = [];
+  const n = Math.min(usdkrw.close.length, cnykrw.close.length);
+  for (let i = 0; i < n; i++) {
+    const k = usdkrw.close[i], c = cnykrw.close[i];
+    if (Number.isFinite(k) && Number.isFinite(c) && c > 0) usdCnyVals.push(k / c);
+  }
+  if (!usdCnyVals.length) throw new Error('Empty Naver history');
+  const data = {
+    'usd-krw': usdKrw,
+    'cny-krw': cnyKrw,
+    'usd-cny': { low: Math.min(...usdCnyVals), high: Math.max(...usdCnyVals) },
+    _src: 'naver',
+  };
+  if (!(usdKrw.low > 500 && usdKrw.high < 3000 && usdKrw.low <= usdKrw.high)) {
+    throw new Error('USD/KRW 52w out of sane range');
+  }
+  if (!(cnyKrw.low > 80 && cnyKrw.high < 500 && cnyKrw.low <= cnyKrw.high)) {
+    throw new Error('CNY/KRW 52w out of sane range');
+  }
+  return data;
+}
+
 function compute52W(json) {
   const usdKrw = [], usdCny = [], cnyKrw = [];
   for (const rates of Object.values(json.rates)) {
@@ -340,13 +396,13 @@ function compute52W(json) {
 // 52W ranges from intraday OHLC (Stooq/Yahoo) are accurate; ECB daily fixings
 // are a narrower approximation. h52wSource carries the actual source so the
 // footer can flag the ECB fallback.
-const ACCURATE_52W = new Set(['stooq', 'yahoo']);
+const ACCURATE_52W = new Set(['naver', 'stooq', 'yahoo']);
 const h52wFromCache = (data) => (data && ACCURATE_52W.has(data._src)) ? data._src : 'ecb';
 
 async function fetchHistorical() {
   // 0. Reuse a recent *accurate* cache — those extremes barely change intraday,
   //    so we skip re-pulling a year of history on every 5-min refresh (saves
-  //    data). An ECB cache is NOT reused: keep retrying the OHLC sources so we
+  //    data). An ECB cache is NOT reused: keep retrying the better sources so we
   //    upgrade from the narrow ECB range to the accurate one as soon as possible.
   const recent = loadCache(CACHE_52W_KEY, CACHE_52W_FETCH_TTL, false);
   if (recent && recent.data && ACCURATE_52W.has(recent.data._src)) {
@@ -354,7 +410,18 @@ async function fetchHistorical() {
     return recent.data;
   }
 
-  // 1. Daily OHLC — true intraday 52-week high/low. Race Stooq and Yahoo and
+  // 1. Naver daily history — matches what users see on Naver and uses the same
+  //    proxy path that already works for the live Naver rate.
+  try {
+    const data = await fetch52WFromNaver();
+    saveCache(CACHE_52W_KEY, data);
+    state.h52wSource = 'naver';
+    return data;
+  } catch (e) {
+    console.warn('52W (Naver) failed:', e && e.message);
+  }
+
+  // 2. Daily OHLC — true intraday 52-week high/low. Race Stooq and Yahoo and
   //    take whichever responds first (Yahoo is often blocked from proxy IPs).
   try {
     const data = await Promise.any([fetch52WFromStooq(), fetch52WFromYahoo()]);
@@ -365,7 +432,7 @@ async function fetchHistorical() {
     console.warn('52W (Stooq/Yahoo) failed:', e && e.message);
   }
 
-  // 2. frankfurter (ECB daily reference) — fallback; range will be narrower
+  // 3. frankfurter (ECB daily reference) — fallback; range will be narrower
   const end   = new Date();
   const start = new Date(end.getTime() - 365 * 24 * 60 * 60 * 1000);
   try {
@@ -381,14 +448,14 @@ async function fetchHistorical() {
     console.warn('52W (frankfurter) failed:', e.message);
   }
 
-  // 3. LocalStorage cache (valid within 24h)
+  // 4. LocalStorage cache (valid within 24h)
   const fresh = loadCache(CACHE_52W_KEY, CACHE_52W_TTL, false);
   if (fresh) {
     state.h52wSource = h52wFromCache(fresh.data);
     return fresh.data;
   }
 
-  // 4. Expired cache (any age) — better than nothing
+  // 5. Expired cache (any age) — better than nothing
   const stale = loadCache(CACHE_52W_KEY, CACHE_52W_TTL, true);
   if (stale) {
     state.h52wSource = 'expired-cache';
