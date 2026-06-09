@@ -604,11 +604,20 @@ const CREDIT_BY_SOURCE = {
   cache:    '데이터: 캐시 (마지막 수신값)',
 };
 
+const H52W_LABEL = {
+  naver: '네이버 일별', stooq: 'Stooq', yahoo: 'Yahoo',
+  ecb: 'ECB 근사', 'expired-cache': '캐시(만료)', none: '없음',
+};
+
 function updateDataCredit() {
   const subtitle = document.getElementById('subtitle');
   if (subtitle) subtitle.textContent = SUBTITLE_BY_SOURCE[state.apiSource] || SUBTITLE_BY_SOURCE.primary;
   const credit = document.getElementById('data-credit');
-  if (credit) credit.textContent = CREDIT_BY_SOURCE[state.apiSource] || CREDIT_BY_SOURCE.primary;
+  if (credit) {
+    const base = CREDIT_BY_SOURCE[state.apiSource] || CREDIT_BY_SOURCE.primary;
+    const h52 = H52W_LABEL[state.h52wSource];
+    credit.textContent = h52 ? `${base}  ·  52주: ${h52}` : base;
+  }
 }
 
 // ── Main fetch orchestration ──────────────────────────────
