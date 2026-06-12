@@ -14,6 +14,11 @@ const NAVER_BASE    = 'https://m.stock.naver.com/front-api/marketIndex/prices?ca
 const NAVER_HIST    = 'https://m.stock.naver.com/front-api/marketIndex/prices?category=exchange&page=1&pageSize=366&reutersCode=';  // ~1y daily history
 const YAHOO_BASE    = 'https://query1.finance.yahoo.com/v8/finance/chart/';
 const STOOQ_BASE    = 'https://stooq.com/q/d/l/?i=d&s=';  // daily OHLC CSV (52-week history)
+// MSN Money quotes — returns 52-week high/low directly (one call). Public apikey
+// embedded in MSN's own pages; instrument ids are per currency pair.
+const MSN_KEY       = '0QfOX3Vn51YCzitbLaRkTTBadtWpgTN8NZLW0C1SEM';
+const MSN_QUOTES    = `https://assets.msn.com/service/Finance/Quotes?apikey=${MSN_KEY}&ids=`;
+const MSN_IDS       = { 'usd-krw': 'avyoyc', 'usd-cny': 'avym77', 'cny-krw': 'av4yvh' };
 const CORS_PROXIES  = [
   'https://corsproxy.io/?url=',
   'https://api.allorigins.win/raw?url=',
@@ -38,7 +43,7 @@ const state = {
   clockTimer:      null,
   isLoading:       false,
   apiSource:       null,  // 'naver' | 'realtime' | 'primary' | 'fallback' | 'cache'
-  h52wSource:      null,  // 'naver' | 'stooq' | 'yahoo' | 'ecb' | 'expired-cache' | 'none'
+  h52wSource:      null,  // 'msn' | 'naver' | 'stooq' | 'yahoo' | 'ecb' | 'expired-cache' | 'none'
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -376,6 +381,38 @@ async function fetch52WFromNaver() {
   return data;
 }
 
+// --- MSN Money: 52-week high/low straight from the quote (one call, no history
+// to compute). Each pair has its own instrument id.
+async function fetch52WFromMsn() {
+  const ids = [MSN_IDS['usd-krw'], MSN_IDS['usd-cny'], MSN_IDS['cny-krw']].join(',');
+  return fetchViaProxies(MSN_QUOTES + ids, (json) => {
+    const arr = Array.isArray(json) ? json : (json && (json.value || json.Quotes || json.quotes));
+    if (!Array.isArray(arr) || !arr.length) throw new Error('No MSN quotes');
+    const byId = {};
+    for (const q of arr) { if (q && q.id) byId[q.id] = q; }
+    const range = (pair) => {
+      const q = byId[MSN_IDS[pair]] || {};
+      const high = q.fiftyTwoWeekHigh != null ? q.fiftyTwoWeekHigh : q.yearHigh;
+      const low  = q.fiftyTwoWeekLow  != null ? q.fiftyTwoWeekLow  : q.yearLow;
+      if (!(Number.isFinite(high) && Number.isFinite(low) && low <= high && high > 0)) {
+        throw new Error('MSN 52w missing for ' + pair);
+      }
+      return { low, high };
+    };
+    const data = {
+      'usd-krw': range('usd-krw'),
+      'usd-cny': range('usd-cny'),
+      'cny-krw': range('cny-krw'),
+      _src: 'msn',
+    };
+    // Sanity guards: bail (→ next source) on absurd values.
+    if (!(data['usd-krw'].low > 500 && data['usd-krw'].high < 3000)) throw new Error('USD/KRW 52w out of range');
+    if (!(data['usd-cny'].low > 3 && data['usd-cny'].high < 12)) throw new Error('USD/CNY 52w out of range');
+    if (!(data['cny-krw'].low > 80 && data['cny-krw'].high < 500)) throw new Error('CNY/KRW 52w out of range');
+    return data;
+  }, HIST_TIMEOUT_MS);
+}
+
 function compute52W(json) {
   const usdKrw = [], usdCny = [], cnyKrw = [];
   for (const rates of Object.values(json.rates)) {
@@ -396,7 +433,7 @@ function compute52W(json) {
 // 52W ranges from intraday OHLC (Stooq/Yahoo) are accurate; ECB daily fixings
 // are a narrower approximation. h52wSource carries the actual source so the
 // footer can flag the ECB fallback.
-const ACCURATE_52W = new Set(['naver', 'stooq', 'yahoo']);
+const ACCURATE_52W = new Set(['msn', 'naver', 'stooq', 'yahoo']);
 const h52wFromCache = (data) => (data && ACCURATE_52W.has(data._src)) ? data._src : 'ecb';
 
 async function fetchHistorical() {
@@ -410,7 +447,17 @@ async function fetchHistorical() {
     return recent.data;
   }
 
-  // 1. Naver daily history — matches what users see on Naver and uses the same
+  // 1. MSN Money — 52-week high/low straight from the quote (single small call).
+  try {
+    const data = await fetch52WFromMsn();
+    saveCache(CACHE_52W_KEY, data);
+    state.h52wSource = 'msn';
+    return data;
+  } catch (e) {
+    console.warn('52W (MSN) failed:', e && e.message);
+  }
+
+  // 2. Naver daily history — matches what users see on Naver and uses the same
   //    proxy path that already works for the live Naver rate.
   try {
     const data = await fetch52WFromNaver();
@@ -605,7 +652,7 @@ const CREDIT_BY_SOURCE = {
 };
 
 const H52W_LABEL = {
-  naver: '네이버 일별', stooq: 'Stooq', yahoo: 'Yahoo',
+  msn: 'MSN', naver: '네이버 일별', stooq: 'Stooq', yahoo: 'Yahoo',
   ecb: 'ECB 근사', 'expired-cache': '캐시(만료)', none: '없음',
 };
 
