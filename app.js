@@ -31,6 +31,7 @@ const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
 const CACHE_52W_KEY       = 'er_52w_v2';          // bumped: drop old ECB-based caches
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
+const BUILD = 'msn2';  // shown in footer so the live build is unambiguous (cache check)
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -663,7 +664,7 @@ function updateDataCredit() {
   if (credit) {
     const base = CREDIT_BY_SOURCE[state.apiSource] || CREDIT_BY_SOURCE.primary;
     const h52 = H52W_LABEL[state.h52wSource];
-    credit.textContent = h52 ? `${base}  ·  52주: ${h52}` : base;
+    credit.textContent = (h52 ? `${base}  ·  52주: ${h52}` : base) + `  ·  build ${BUILD}`;
   }
 }
 
