@@ -31,7 +31,7 @@ const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
 const CACHE_52W_KEY       = 'er_52w_v2';          // bumped: drop old ECB-based caches
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
-const BUILD = 'msn3';  // shown in footer so the live build is unambiguous (cache check)
+const BUILD = 'msn4';  // shown in footer so the live build is unambiguous (cache check)
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -45,6 +45,7 @@ const state = {
   isLoading:       false,
   apiSource:       null,  // 'naver' | 'realtime' | 'primary' | 'fallback' | 'cache'
   h52wSource:      null,  // 'msn' | 'naver' | 'stooq' | 'yahoo' | 'ecb' | 'expired-cache' | 'none'
+  h52wDiag:        '',    // TEMP: MSN failure reason for footer
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -138,6 +139,15 @@ function fetchViaProxies(target, extract, ms = RT_TIMEOUT_MS) {
 function asRate(value) {
   if (typeof value !== 'number' || !(value > 0)) throw new Error('No usable value in response');
   return value;
+}
+
+// Readable reason for a failure. Promise.any rejects with an AggregateError
+// whose `.errors` holds each proxy's cause.
+function diagMsg(e) {
+  if (e && e.errors && e.errors.length) {
+    return e.errors.map((x) => (x && (x.message || String(x))) || '?').join(' | ');
+  }
+  return (e && (e.message || String(e))) || '?';
 }
 
 // ── Fetch: realtime rates (Naver — 하나은행 매매기준율) ──
@@ -463,8 +473,10 @@ async function fetchHistorical() {
     const data = await fetch52WFromMsn();
     saveCache(CACHE_52W_KEY, data);
     state.h52wSource = 'msn';
+    state.h52wDiag = '';
     return data;
   } catch (e) {
+    state.h52wDiag = 'MSN✕ ' + diagMsg(e);  // TEMP: surface why MSN failed
     console.warn('52W (MSN) failed:', e && e.message);
   }
 
@@ -674,7 +686,8 @@ function updateDataCredit() {
   if (credit) {
     const base = CREDIT_BY_SOURCE[state.apiSource] || CREDIT_BY_SOURCE.primary;
     const h52 = H52W_LABEL[state.h52wSource];
-    credit.textContent = (h52 ? `${base}  ·  52주: ${h52}` : base) + `  ·  build ${BUILD}`;
+    const diag = (state.h52wSource !== 'msn' && state.h52wDiag) ? `  ·  ${state.h52wDiag}` : '';
+    credit.textContent = (h52 ? `${base}  ·  52주: ${h52}` : base) + `  ·  build ${BUILD}` + diag;
   }
 }
 
