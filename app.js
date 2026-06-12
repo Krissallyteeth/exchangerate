@@ -31,7 +31,7 @@ const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
 const CACHE_52W_KEY       = 'er_52w_v3';          // bumped: drop old Yahoo/ECB caches so MSN is tried
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
-const BUILD = 'msn5';  // shown in footer so the live build is unambiguous (cache check)
+const BUILD = 'msn6';  // shown in footer so the live build is unambiguous (cache check)
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -402,13 +402,23 @@ async function fetch52WFromMsn() {
     const byId = {};
     for (const q of arr) { if (q && q.id) byId[q.id] = q; }
     // MSN field names for 52w high/low vary; try common ones, then scan keys.
+    const toNum = (v) => {
+      if (typeof v === 'number') return v;
+      if (typeof v === 'string') return parseFloat(v.replace(/,/g, ''));
+      return NaN;
+    };
     const msnField = (q, kind) => {
       const explicit = kind === 'high'
-        ? [q.fiftyTwoWeekHigh, q.priceFiftyTwoWeekHigh, q.yearHigh]
-        : [q.fiftyTwoWeekLow,  q.priceFiftyTwoWeekLow,  q.yearLow];
-      for (const v of explicit) if (Number.isFinite(v)) return v;
-      const re = new RegExp(kind, 'i');
-      for (const k in q) if (/52/.test(k) && re.test(k) && Number.isFinite(q[k])) return q[k];
+        ? [q.fiftyTwoWeekHigh, q.priceFiftyTwoWeekHigh, q.yearHigh, q.high52Week, q.fiftyTwoWeekHighPrice]
+        : [q.fiftyTwoWeekLow,  q.priceFiftyTwoWeekLow,  q.yearLow,  q.low52Week,  q.fiftyTwoWeekLowPrice];
+      for (const v of explicit) { const n = toNum(v); if (Number.isFinite(n)) return n; }
+      const reKind = new RegExp(kind, 'i');  // broadened scan: catch any 52w/year/week high|low key
+      for (const k in q) {
+        const lk = k.toLowerCase();
+        if (reKind.test(lk) && /52|fiftytwo|year|week|wk/.test(lk)) {
+          const n = toNum(q[k]); if (Number.isFinite(n)) return n;
+        }
+      }
       return undefined;
     };
     const range = (pair) => {
@@ -416,7 +426,8 @@ async function fetch52WFromMsn() {
       const high = msnField(q, 'high');
       const low  = msnField(q, 'low');
       if (!(Number.isFinite(high) && Number.isFinite(low) && low <= high && high > 0)) {
-        throw new Error('MSN 52w missing for ' + pair);
+        // TEMP: dump the actual keys so we can see MSN's real field names.
+        throw new Error('MSNkeys[' + pair + ']:' + Object.keys(q).join(',').slice(0, 280));
       }
       return { low, high };
     };
