@@ -17,7 +17,7 @@ const STOOQ_BASE    = 'https://stooq.com/q/d/l/?i=d&s=';  // daily OHLC CSV (52-
 // MSN Money quotes — returns 52-week high/low directly (one call). Public apikey
 // embedded in MSN's own pages; instrument ids are per currency pair.
 const MSN_KEY       = '0QfOX3Vn51YCzitbLaRkTTBadtWpgTN8NZLW0C1SEM';
-const MSN_QUOTES    = `https://assets.msn.com/service/Finance/Quotes?apikey=${MSN_KEY}&ids=`;
+const MSN_QUOTES    = `https://assets.msn.com/service/finance/quotes?apikey=${MSN_KEY}&wrapodata=false&ids=`;
 const MSN_IDS       = { 'usd-krw': 'avyoyc', 'usd-cny': 'avym77', 'cny-krw': 'av4yvh' };
 const CORS_PROXIES  = [
   'https://corsproxy.io/?url=',
@@ -31,7 +31,7 @@ const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
 const CACHE_52W_KEY       = 'er_52w_v2';          // bumped: drop old ECB-based caches
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
-const BUILD = 'msn2';  // shown in footer so the live build is unambiguous (cache check)
+const BUILD = 'msn3';  // shown in footer so the live build is unambiguous (cache check)
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -391,10 +391,20 @@ async function fetch52WFromMsn() {
     if (!Array.isArray(arr) || !arr.length) throw new Error('No MSN quotes');
     const byId = {};
     for (const q of arr) { if (q && q.id) byId[q.id] = q; }
+    // MSN field names for 52w high/low vary; try common ones, then scan keys.
+    const msnField = (q, kind) => {
+      const explicit = kind === 'high'
+        ? [q.fiftyTwoWeekHigh, q.priceFiftyTwoWeekHigh, q.yearHigh]
+        : [q.fiftyTwoWeekLow,  q.priceFiftyTwoWeekLow,  q.yearLow];
+      for (const v of explicit) if (Number.isFinite(v)) return v;
+      const re = new RegExp(kind, 'i');
+      for (const k in q) if (/52/.test(k) && re.test(k) && Number.isFinite(q[k])) return q[k];
+      return undefined;
+    };
     const range = (pair) => {
       const q = byId[MSN_IDS[pair]] || {};
-      const high = q.fiftyTwoWeekHigh != null ? q.fiftyTwoWeekHigh : q.yearHigh;
-      const low  = q.fiftyTwoWeekLow  != null ? q.fiftyTwoWeekLow  : q.yearLow;
+      const high = msnField(q, 'high');
+      const low  = msnField(q, 'low');
       if (!(Number.isFinite(high) && Number.isFinite(low) && low <= high && high > 0)) {
         throw new Error('MSN 52w missing for ' + pair);
       }
