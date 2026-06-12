@@ -28,10 +28,10 @@ const REFRESH_MS    = 5 * 60 * 1000;   // 5 minutes
 const CACHE_52W_TTL       = 24 * 60 * 60 * 1000;  // 24 hours (cache usable as fallback)
 const CACHE_52W_FETCH_TTL = 6 * 60 * 60 * 1000;   // 6 hours (re-pull history at most this often)
 const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
-const CACHE_52W_KEY       = 'er_52w_v2';          // bumped: drop old ECB-based caches
+const CACHE_52W_KEY       = 'er_52w_v3';          // bumped: drop old Yahoo/ECB caches so MSN is tried
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
-const BUILD = 'msn4';  // shown in footer so the live build is unambiguous (cache check)
+const BUILD = 'msn5';  // shown in footer so the live build is unambiguous (cache check)
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -458,13 +458,13 @@ const ACCURATE_52W = new Set(['msn', 'naver', 'stooq', 'yahoo']);
 const h52wFromCache = (data) => (data && ACCURATE_52W.has(data._src)) ? data._src : 'ecb';
 
 async function fetchHistorical() {
-  // 0. Reuse a recent *accurate* cache — those extremes barely change intraday,
-  //    so we skip re-pulling a year of history on every 5-min refresh (saves
-  //    data). An ECB cache is NOT reused: keep retrying the better sources so we
-  //    upgrade from the narrow ECB range to the accurate one as soon as possible.
+  // 0. Reuse a recent *MSN* cache (the top, most accurate source). Any lower
+  //    source in cache means MSN failed last time, so we DON'T short-circuit —
+  //    we retry MSN to upgrade. (Re-pulling MSN is one tiny call anyway.)
   const recent = loadCache(CACHE_52W_KEY, CACHE_52W_FETCH_TTL, false);
-  if (recent && recent.data && ACCURATE_52W.has(recent.data._src)) {
-    state.h52wSource = recent.data._src;
+  if (recent && recent.data && recent.data._src === 'msn') {
+    state.h52wSource = 'msn';
+    state.h52wDiag = '';
     return recent.data;
   }
 
