@@ -31,7 +31,7 @@ const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
 const CACHE_52W_KEY       = 'er_52w_v3';          // bumped: drop old Yahoo/ECB caches so MSN is tried
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
-const BUILD = 'msn7';  // shown in footer so the live build is unambiguous (cache check)
+const BUILD = 'msn8';  // shown in footer so the live build is unambiguous (cache check)
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -397,8 +397,9 @@ async function fetch52WFromNaver() {
 async function fetch52WFromMsn() {
   const ids = [MSN_IDS['usd-krw'], MSN_IDS['usd-cny'], MSN_IDS['cny-krw']].join(',');
   return fetchViaProxies(MSN_QUOTES + ids, (json) => {
+    const rawSnip = (() => { try { return JSON.stringify(json).slice(0, 200); } catch (_) { return String(json).slice(0, 200); } })();
     const arr = Array.isArray(json) ? json : (json && (json.value || json.Quotes || json.quotes || json.responses));
-    if (!Array.isArray(arr) || !arr.length) throw new Error('No MSN quotes');
+    if (!Array.isArray(arr) || !arr.length) throw new Error('MSNraw:' + rawSnip);
     // Map quote → pair by id field (name varies) or, failing that, by request order.
     const order = ['usd-krw', 'usd-cny', 'cny-krw'];
     const idOf = (q) => q && (q.id || q.secId || q.securityId || q.symbol || q.RT00S);
@@ -432,8 +433,8 @@ async function fetch52WFromMsn() {
       const high = msnField(q, 'high');
       const low  = msnField(q, 'low');
       if (!(Number.isFinite(high) && Number.isFinite(low) && low <= high && high > 0)) {
-        // TEMP: dump the real object's keys so we can see MSN's field names.
-        throw new Error('MSNk:' + Object.keys(arr[0] || {}).join(',').slice(0, 260));
+        // TEMP: dump the raw response so we can see MSN's actual structure/fields.
+        throw new Error('MSNraw:' + rawSnip);
       }
       return { low, high };
     };
