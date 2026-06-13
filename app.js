@@ -31,7 +31,7 @@ const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
 const CACHE_52W_KEY       = 'er_52w_v3';          // bumped: drop old Yahoo/ECB caches so MSN is tried
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
-const BUILD = 'msn6';  // shown in footer so the live build is unambiguous (cache check)
+const BUILD = 'msn7';  // shown in footer so the live build is unambiguous (cache check)
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -397,11 +397,17 @@ async function fetch52WFromNaver() {
 async function fetch52WFromMsn() {
   const ids = [MSN_IDS['usd-krw'], MSN_IDS['usd-cny'], MSN_IDS['cny-krw']].join(',');
   return fetchViaProxies(MSN_QUOTES + ids, (json) => {
-    const arr = Array.isArray(json) ? json : (json && (json.value || json.Quotes || json.quotes));
+    const arr = Array.isArray(json) ? json : (json && (json.value || json.Quotes || json.quotes || json.responses));
     if (!Array.isArray(arr) || !arr.length) throw new Error('No MSN quotes');
-    const byId = {};
-    for (const q of arr) { if (q && q.id) byId[q.id] = q; }
-    // MSN field names for 52w high/low vary; try common ones, then scan keys.
+    // Map quote → pair by id field (name varies) or, failing that, by request order.
+    const order = ['usd-krw', 'usd-cny', 'cny-krw'];
+    const idOf = (q) => q && (q.id || q.secId || q.securityId || q.symbol || q.RT00S);
+    const byPair = {};
+    arr.forEach((q, i) => {
+      const idv = idOf(q);
+      const pair = order.find((p) => MSN_IDS[p] === idv) || order[i];  // fall back to index
+      if (pair && !byPair[pair]) byPair[pair] = q;
+    });
     const toNum = (v) => {
       if (typeof v === 'number') return v;
       if (typeof v === 'string') return parseFloat(v.replace(/,/g, ''));
@@ -422,12 +428,12 @@ async function fetch52WFromMsn() {
       return undefined;
     };
     const range = (pair) => {
-      const q = byId[MSN_IDS[pair]] || {};
+      const q = byPair[pair] || {};
       const high = msnField(q, 'high');
       const low  = msnField(q, 'low');
       if (!(Number.isFinite(high) && Number.isFinite(low) && low <= high && high > 0)) {
-        // TEMP: dump the actual keys so we can see MSN's real field names.
-        throw new Error('MSNkeys[' + pair + ']:' + Object.keys(q).join(',').slice(0, 280));
+        // TEMP: dump the real object's keys so we can see MSN's field names.
+        throw new Error('MSNk:' + Object.keys(arr[0] || {}).join(',').slice(0, 260));
       }
       return { low, high };
     };
