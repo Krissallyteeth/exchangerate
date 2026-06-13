@@ -31,7 +31,6 @@ const CACHE_NOW_TTL       = 60 * 60 * 1000;       // 1 hour
 const CACHE_52W_KEY       = 'er_52w_v3';          // bumped: drop old Yahoo/ECB caches so MSN is tried
 
 const PAIRS = ['usd-krw', 'cny-krw', 'usd-cny'];
-const BUILD = 'msn9';  // shown in footer so the live build is unambiguous (cache check)
 
 // ── State ──────────────────────────────────────────────────
 const state = {
@@ -45,7 +44,6 @@ const state = {
   isLoading:       false,
   apiSource:       null,  // 'naver' | 'realtime' | 'primary' | 'fallback' | 'cache'
   h52wSource:      null,  // 'msn' | 'naver' | 'stooq' | 'yahoo' | 'ecb' | 'expired-cache' | 'none'
-  h52wDiag:        '',    // TEMP: MSN failure reason for footer
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -139,15 +137,6 @@ function fetchViaProxies(target, extract, ms = RT_TIMEOUT_MS) {
 function asRate(value) {
   if (typeof value !== 'number' || !(value > 0)) throw new Error('No usable value in response');
   return value;
-}
-
-// Readable reason for a failure. Promise.any rejects with an AggregateError
-// whose `.errors` holds each proxy's cause.
-function diagMsg(e) {
-  if (e && e.errors && e.errors.length) {
-    return e.errors.map((x) => (x && (x.message || String(x))) || '?').join(' | ');
-  }
-  return (e && (e.message || String(e))) || '?';
 }
 
 // ── Fetch: realtime rates (Naver — 하나은행 매매기준율) ──
@@ -403,7 +392,7 @@ async function fetch52WFromMsn() {
       if (Array.isArray(x)) x.forEach(walk);
       else if (x && typeof x === 'object') flat.push(x);
     })(json);
-    if (!flat.length) throw new Error('MSNraw:' + (() => { try { return JSON.stringify(json).slice(0, 180); } catch (_) { return String(json).slice(0, 180); } })());
+    if (!flat.length) throw new Error('No MSN quotes');
     // Map quote → pair by currency pair, or by request order as a fallback.
     const order = ['usd-krw', 'usd-cny', 'cny-krw'];
     const wantKey = { 'usd-krw': 'USD/KRW', 'usd-cny': 'USD/CNY', 'cny-krw': 'CNY/KRW' };
@@ -437,8 +426,7 @@ async function fetch52WFromMsn() {
       const high = msnField(q, 'high');
       const low  = msnField(q, 'low');
       if (!(Number.isFinite(high) && Number.isFinite(low) && low <= high && high > 0)) {
-        // TEMP: dump the matched object's full key list so we see MSN's field names.
-        throw new Error('MSNkeys:' + Object.keys(q).join(',').slice(0, 240));
+        throw new Error('MSN 52w not found for ' + pair);
       }
       return { low, high };
     };
@@ -486,7 +474,6 @@ async function fetchHistorical() {
   const recent = loadCache(CACHE_52W_KEY, CACHE_52W_FETCH_TTL, false);
   if (recent && recent.data && recent.data._src === 'msn') {
     state.h52wSource = 'msn';
-    state.h52wDiag = '';
     return recent.data;
   }
 
@@ -495,10 +482,8 @@ async function fetchHistorical() {
     const data = await fetch52WFromMsn();
     saveCache(CACHE_52W_KEY, data);
     state.h52wSource = 'msn';
-    state.h52wDiag = '';
     return data;
   } catch (e) {
-    state.h52wDiag = 'MSN✕ ' + diagMsg(e);  // TEMP: surface why MSN failed
     console.warn('52W (MSN) failed:', e && e.message);
   }
 
@@ -708,8 +693,7 @@ function updateDataCredit() {
   if (credit) {
     const base = CREDIT_BY_SOURCE[state.apiSource] || CREDIT_BY_SOURCE.primary;
     const h52 = H52W_LABEL[state.h52wSource];
-    const diag = (state.h52wSource !== 'msn' && state.h52wDiag) ? `  ·  ${state.h52wDiag}` : '';
-    credit.textContent = (h52 ? `${base}  ·  52주: ${h52}` : base) + `  ·  build ${BUILD}` + diag;
+    credit.textContent = h52 ? `${base}  ·  52주: ${h52}` : base;
   }
 }
 
